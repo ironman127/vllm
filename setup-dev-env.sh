@@ -101,12 +101,31 @@ gcc --version | head -1
 
 # ccache：vLLM setup.py 检测到后自动加 -DCMAKE_*_COMPILER_LAUNCHER=ccache，
 # 按源文件内容哈希缓存编译产物，第二遍编译命中后可快数倍~数十倍（解决“重编很慢”）。
-command -v ccache >/dev/null 2>&1 || dnf install -y ccache
+#
+# 【关键】必须用 ccache >= 4.x！el8 的 dnf 只有 3.7.7，它不认识 CMake 给 nvcc 传的
+# “-x cu”，会判 "Unsupported language: cu" 直接 fallback，导致 130 个 CUDA kernel
+# 一个都不缓存 → CUDA 部分每次全量重编（表现为“改一行还在全编译”）。4.x 才修复。
+CCACHE_VER=4.10.2
+need_ccache=1
+if command -v ccache >/dev/null 2>&1; then
+  cur=$(ccache --version | sed -n '1s/.*version \([0-9]\+\).*/\1/p')
+  [ "${cur:-0}" -ge 4 ] 2>/dev/null && need_ccache=0
+fi
+if [ "$need_ccache" = 1 ]; then
+  log "  安装 ccache ${CCACHE_VER} 静态二进制（dnf 的 3.7.7 不支持 CUDA -x cu）"
+  tmpd=$(mktemp -d); pkg="ccache-${CCACHE_VER}-linux-x86_64"
+  url="https://github.com/ccache/ccache/releases/download/v${CCACHE_VER}/${pkg}.tar.xz"
+  ( cd "$tmpd" && { curl -fsSL -o c.tar.xz "$url" || curl -fsSL -o c.tar.xz "https://gh-proxy.com/$url"; } \
+    && tar xf c.tar.xz && install -m755 "$pkg/ccache" /usr/local/bin/ccache )
+  rm -rf "$tmpd"; hash -r
+fi
 export CCACHE_DIR=/root/.cache/ccache
 mkdir -p "$CCACHE_DIR"
 ccache -M 50G >/dev/null
-ccache -o sloppiness=pch_defines,time_macros,include_file_mtime,include_file_ctime >/dev/null 2>&1 || true
+ccache -o sloppiness=pch_defines,time_macros,include_file_mtime,include_file_ctime,gcno_cwd >/dev/null 2>&1 \
+  || ccache -o sloppiness=pch_defines,time_macros,include_file_mtime,include_file_ctime >/dev/null 2>&1 || true
 ccache -o hash_dir=false >/dev/null 2>&1 || true
+ccache -o compiler_check=content >/dev/null 2>&1 || true
 ccache --version | head -1
 
 # -----------------------------------------------------------------------------

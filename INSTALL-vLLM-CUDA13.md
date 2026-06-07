@@ -229,21 +229,35 @@ python -c "import vllm._C; print('vllm._C OK')"
 ### 现象
 第一遍能编过，但**改一点代码后第二遍重编几乎和首遍一样慢，看不到增量效果**。
 
-### 根因（两个）
+### 根因（三个，第 3 个才是“CUDA 全编译”的真凶）
 1. **没装 ccache**：vLLM 的 `setup.py` 会探测 `ccache`/`sccache`，探测到才注入
    `-DCMAKE_*_COMPILER_LAUNCHER`。没装时编译器无任何缓存，每次都从零编。
 2. **`build/` 临时目录不持久**：源码 `pip install -e .` 的 `build_temp` 可能被清，
    CMake/Ninja 的「按时间戳跳过未改文件」式增量随之失效——这时**唯一能跨构建复用的就是 ccache**
    （它按源文件内容哈希缓存，不依赖 build 目录是否还在）。
+3. **【真凶】ccache 版本太老（el8 dnf 默认 3.7.7），不缓存 CUDA**：
+   CMake 编译 `.cu` 时会显式给 nvcc 传 **`-x cu`** 指定源语言。**ccache 3.x 不认识 `cu` 这个语言**，
+   直接判 `Unsupported language: cu` → fallback 跑真实 nvcc，**完全不缓存**。
+   于是 130 个 CUDA kernel（编译最慢的大头）每次全量重编，C++ 部分却能命中——
+   表现就是「改一行 Python/C++ 也像在全编译」。用 `ccache -s` 能看到大量
+   `unsupported source language`（≈ 你的 .cu 编译次数）即坐实此因。**修复要 ccache ≥ 4.x。**
 
-### 做什么
+### 做什么：装 ccache ≥ 4.x（dnf 的 3.7.7 没用，必须换）
 ```bash
-dnf install -y ccache
+# el8 dnf 只有 3.7.7，用官方静态二进制装 4.x：
+ver=4.10.2; pkg=ccache-${ver}-linux-x86_64
+url=https://github.com/ccache/ccache/releases/download/v${ver}/${pkg}.tar.xz
+cd /tmp && { curl -fsSL -o c.tar.xz "$url" || curl -fsSL -o c.tar.xz "https://gh-proxy.com/$url"; }
+tar xf c.tar.xz && install -m755 "$pkg/ccache" /usr/local/bin/ccache && hash -r
+ccache --version          # 必须显示 4.x；/usr/local/bin 须在 PATH 中 /usr/bin 之前
+
 export CCACHE_DIR=/root/.cache/ccache
 ccache -M 50G                       # CUDA 目标文件大，缓存上限给足
-ccache -o sloppiness=pch_defines,time_macros,include_file_mtime,include_file_ctime
+ccache -o compiler_check=content    # 按编译器内容而非 mtime 判定，换工具链不误失效
+ccache -o sloppiness=pch_defines,time_macros,include_file_mtime,include_file_ctime,gcno_cwd
 ccache -o hash_dir=false            # 不把绝对路径计入哈希，跨临时 build 目录也能命中
 ```
+> 一键脚本 `setup-dev-env.sh` 已内置「检测到 ccache<4 自动下载 4.x」逻辑，无需手动操作。
 装好后**无需改任何编译命令**——`setup.py` 自动检测并启用：
 ```244:250:/root/vllm/setup.py
         elif is_ccache_available():
@@ -277,6 +291,18 @@ uv pip install -e . --no-build-isolation    # 改代码后重编
 ccache -s                                   # 看 cache hit：第二遍应有大量 (direct)/(preprocessed) 命中
 ```
 > 注意：**第一遍是“填充缓存”，必然慢**；从第二遍起才显著加速。首遍慢属正常，不要误判 ccache 没生效。
+
+### 确诊「CUDA 没缓存」（最易踩的坑）
+若第二遍 CUDA 仍全量重编，跑 `ccache -s` 看这一行：
+```
+unsupported source language   965     ← 约等于你的 .cu 编译次数 = CUDA 全没缓存
+```
+还可开日志看 ccache 拒绝的原因：
+```bash
+CCACHE_LOGFILE=/tmp/cc.log uv pip install -e . --no-build-isolation
+grep -i 'unsupported\|language' /tmp/cc.log | head
+# 若出现 "Unsupported language: cu" → 就是 ccache 3.x 不认 CMake 传的 -x cu，升级到 4.x 即解决
+```
 
 ### 增量编译的正确姿势
 | 改了什么 | 怎么做 | 是否重编 |

@@ -12,7 +12,16 @@ export LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat:$LD_LIBRARY_PATH
 #    vLLM setup.py 检测到 ccache 会自动注入 -DCMAKE_*_COMPILER_LAUNCHER=ccache。
 export CCACHE_DIR=/root/.cache/ccache
 export CCACHE_MAXSIZE=50G
-command -v ccache >/dev/null 2>&1 || echo "[warn] 未装 ccache，编译无缓存会很慢：dnf install -y ccache"
+# 【关键】必须 ccache>=4：3.x(el8 dnf 默认 3.7.7) 不认 CMake 给 nvcc 的“-x cu”，
+# 会判 "Unsupported language: cu" 而完全不缓存 CUDA → 改一行仍全量重编。
+if command -v ccache >/dev/null 2>&1; then
+  _ccver=$(ccache --version | sed -n '1s/.*version \([0-9]\+\).*/\1/p')
+  [ "${_ccver:-0}" -lt 4 ] 2>/dev/null && \
+    echo "[warn] ccache $(ccache --version|head -1|grep -o '[0-9.]*') 过旧，不缓存 CUDA(-x cu)！请装 4.x：bash setup-dev-env.sh"
+  unset _ccver
+else
+  echo "[warn] 未装 ccache，编译无缓存会很慢，请运行：bash setup-dev-env.sh"
+fi
 # MAX_JOBS 总并行；NVCC_THREADS 让每个 nvcc 内部多线程，并行单元数≈MAX_JOBS/NVCC_THREADS，
 # 既跑满多核又避免过多 nvcc 同时吃满内存。
 export MAX_JOBS=360
