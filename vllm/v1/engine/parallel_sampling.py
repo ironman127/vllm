@@ -1,6 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# 【模块说明】ParentRequest —— 并行采样（n>1）请求管理模块
+#
+# 当用户请求 SamplingParams.n > 1（即同一 prompt 需生成多个独立候选序列）时，
+# vLLM 将其拆分为 n 个子请求分别独立执行。本模块负责管理这一"拆分-聚合"过程。
+#
+# 主要职责：
+#   - 子请求派生 : get_child_requests() 将父请求拆分为 n 个 EngineCoreRequest，
+#                  每个子请求的 sampling_params.n = 1；若父请求设置了 seed，则
+#                  每个子请求获得唯一偏移种子（seed + index）以确保多样性。
+#   - 完成追踪   : child_requests 集合记录尚未完成的子请求 ID；每当子请求完成
+#                  时通过 child_request_finished() 更新状态。
+#   - 输出聚合   : 在 FINAL_ONLY 模式下，将各子请求的 CompletionOutput 按 index
+#                  填入 output_aggregator 列表，待所有子请求完成后一次性返回；
+#                  在流式（DELTA/CUMULATIVE）模式下，子输出实时转发。
+#
+# 主要类：ParentRequest（每个 n>1 请求对应一个实例，由 OutputProcessor 管理）
+
 from copy import copy
 from typing import cast
 

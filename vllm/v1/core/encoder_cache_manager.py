@@ -1,6 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# 【模块说明】encoder_cache_manager.py —— 多模态编码器输出缓存管理器
+#
+# EncoderCacheManager 负责缓存多模态输入（图像、音频等）经编码器处理后
+# 的特征向量（vision embeddings），避免相同输入重复执行昂贵的编码器前向传播。
+#
+# 核心设计：
+#   - 以 (request_id, mm_input_index) 为键，管理每个请求的每个多模态输入槽位；
+#   - 以 mm_hash（多模态内容哈希）为全局缓存键（OrderedDict，LRU 顺序），
+#     实现跨请求的编码器输出共享；
+#   - 编码器缓存使用独立的"encoder token 槽位"计数，与 KV Cache block 分离。
+#
+# 主要方法：
+#   get_cached_input()   : 查询 mm_hash 是否已有缓存输出，有则返回对应
+#                          encoder token 区间（start, end），供 ModelRunner 复用。
+#   cache_input()        : 将新编码的多模态输入写入缓存，记录 mm_hash → 槽位映射。
+#   get_num_cached_tokens(): 查询指定请求的编码器输出已缓存多少 tokens。
+#   free()               : 请求完成时释放其占用的编码器 token 槽位；
+#                          若 mm_hash 对应的缓存仍被其他请求引用，不立即淘汰（引用计数）。
+#   evict()              : 内存不足时按 LRU 顺序淘汰最久未访问的编码器缓存条目。
+#
+# 注意：
+#   编码器缓存（EncoderCacheManager）与 KV Cache（KVCacheManager）是相互独立的
+#   两套缓存系统，前者缓存编码器的输出特征，后者缓存 decoder attention 的 KV。
+
 from collections import OrderedDict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING

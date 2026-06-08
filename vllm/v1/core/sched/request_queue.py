@@ -1,6 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# 【模块说明】sched/request_queue.py —— 调度器请求队列策略层
+#
+# 定义调度器的 waiting 队列抽象与两种具体实现，将排队策略与调度逻辑解耦。
+# 通过 create_request_queue() 工厂函数按配置创建具体队列。
+#
+# 主要内容：
+#   SchedulingPolicy     : 枚举（FCFS / PRIORITY），由 VllmConfig.scheduler_config
+#                          控制，决定创建哪种队列。
+#
+#   RequestQueue（ABC）  : 抽象基类，定义 add_request() / pop_request() /
+#                          __len__() / __iter__() / remove() 等接口。
+#
+#   FCFSRequestQueue     : 先来先服务实现，底层 collections.deque，
+#                          add_request() 追加尾部，pop_request() 弹出头部，O(1)。
+#
+#   PriorityRequestQueue : 优先级队列实现，底层 heapq（最小堆），
+#                          以 Request.priority 为键（值越小优先级越高），
+#                          add_request() 调用 heappush，pop_request() 调用 heappop。
+#
+#   create_request_queue(): 工厂函数，根据 SchedulerConfig.policy 返回对应实例。
+
 import heapq
 from abc import ABC, abstractmethod
 from collections import deque

@@ -1,5 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# 【模块说明】kv_cache_coordinator.py —— 多类型 KV Cache 协调层
+#
+# KVCacheCoordinator 是 KVCacheManager 与 SingleTypeKVCacheManager 之间的中间层，
+# 负责将多个异构 KV Cache group（如 FullAttention + SlidingWindow + Mamba）的操作
+# 统一协调为单一接口，对上层（KVCacheManager）屏蔽类型差异。
+#
+# 主要职责：
+#   1. 按 KV group 分发操作（allocate_slots / free_request / get_computed_blocks）
+#      - 一个请求可能跨越多种 KV Cache 类型（如混合注意力模型），
+#        Coordinator 将操作路由到每个 group 对应的 SingleTypeKVCacheManager。
+#
+#   2. 块大小 LCM 对齐（block_size）
+#      - 不同 KV group 的 block_size 可能不同，Coordinator 计算所有 group 的
+#        block_size LCM，确保调度层以统一粒度分配块。
+#
+#   3. 两种实现：
+#      - UnifiedKVCacheCoordinator : 所有 group 共享同一个 BlockPool（单类型或
+#        block_size 相同时），通过 group_id 路由到不同 SingleTypeKVCacheManager。
+#      - SeparatedKVCacheCoordinator : 每个 group 拥有独立 BlockPool，用于
+#        block_size 不同的异构 attention 类型（如 FullAttention + SlidingWindow）。
+#
+#   get_kv_cache_coordinator() : 工厂函数，根据 KVCacheConfig 选择合适实现。
+
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple

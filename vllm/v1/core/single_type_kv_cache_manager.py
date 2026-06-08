@@ -1,5 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# 【模块说明】single_type_kv_cache_manager.py —— 单类型 KV Cache 管理器
+#
+# 针对单一 KV Cache 类型（FullAttention、SlidingWindow、Mamba、MLA 等）实现
+# 具体的块分配/释放/前缀查找逻辑。由 KVCacheCoordinator 按 KV group 实例化和调用。
+#
+# 核心抽象：
+#   SingleTypeKVCacheManager（ABC）:
+#     所有单类型管理器的基类，定义以下接口：
+#       get_computed_blocks()  : 查询请求的前缀在缓存中已命中的块数；
+#       allocate_slots()       : 为请求本步所需的 token 分配物理块；
+#       free_request()         : 请求完成/抢占后释放占用的块；
+#       get_num_new_blocks()   : 计算本步需新分配的块数；
+#       save_new_block_hashes(): 将新填充的块写入前缀哈希索引。
+#
+# 具体实现：
+#   FullAttentionManager        : 标准全注意力，支持前缀缓存（PrefixHash）；
+#   SlidingWindowManager        : 滑动窗口注意力，仅缓存窗口内的块；
+#   ChunkedLocalAttentionManager: 分块局部注意力，类似滑动窗口的变体；
+#   SinkFullAttentionManager    : 保留 sink tokens 的 Full Attention；
+#   TQFullAttentionManager      : TQ（Token Query）Full Attention；
+#   MambaManager                : Mamba SSM，无前缀缓存，每步固定一个 state block；
+#   MLAManager                  : Multi-head Latent Attention（DeepSeek），
+#                                 压缩 KV，与 FullAttention 类似但有独立的压缩维度；
+#   SlidingWindowMLAManager     : SlidingWindow + MLA 的组合；
+#   HiddenStateCacheManager     : 缓存 hidden state 输出（非 KV Cache）；
+#   CrossAttentionManager       : Cross-attention（Encoder-Decoder），
+#                                 KV 由 encoder 输出决定，与 prompt 长度绑定；
+#
+#   get_manager_for_kv_cache_spec(): 工厂函数，根据 KVCacheSpec 类型返回对应管理器类。
+
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict

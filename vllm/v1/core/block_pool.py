@@ -1,5 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# 【模块说明】block_pool.py —— KV Cache 物理块池（BlockPool）
+#
+# BlockPool 是 KV Cache 物理块的底层分配器，管理固定数量的 KVCacheBlock 对象池，
+# 通过 FreeKVCacheBlockQueue（双向链表）实现 O(1) 分配与释放，
+# 通过 BlockHashToBlockMap 实现前缀哈希到物理块的映射（prefix cache 索引）。
+#
+# 主要职责：
+#   1. 块分配与释放（allocate / free）
+#      - allocate()：从 free list 弹出空闲块，记录 ref_count=1；
+#      - free()    ：递减 ref_count，归零时重置块状态并归还 free list；
+#        若块有内容（has_content=True）且哈希命中，保留在哈希索引中供 LRU 复用。
+#
+#   2. 前缀缓存索引（BlockHashToBlockMap）
+#      - cache_full_blocks()：将已填充完整的块写入哈希映射；
+#      - get_cached_block()  ：按 BlockHash 查询是否存在命中块；
+#        命中时提升块的引用计数（ref_count++），防止被 LRU 淘汰。
+#
+#   3. LRU 淘汰（evict）
+#      - FreeKVCacheBlockQueue 按 LRU 顺序排列空闲块（has_content=True 的在尾部）；
+#      - 当 free list 耗尽时，淘汰最久未访问的已缓存块，从哈希索引中移除。
+#      - 前缀缓存 = 哈希表（快速查找） + LRU 队列（物理内存复用）
+#
+#   4. KVCacheEvent 发布
+#      - 分配/释放时生成 BlockStored / BlockRemoved / AllBlocksCleared 事件，
+#        供分布式 KV 传输层（KVConnector）监听。
+#
+# 关键数据结构：
+#   KVCacheBlock           : 物理块对象（block_id、ref_count、block_hash、content flag）；
+#   FreeKVCacheBlockQueue  : 基于双向链表的 free list，支持 O(1) 任意位置移除；
+#   BlockHashToBlockMap    : dict[BlockHash, KVCacheBlock]，前缀缓存的核心索引。
+
 from collections.abc import Iterable, Sequence
 from typing import Any
 

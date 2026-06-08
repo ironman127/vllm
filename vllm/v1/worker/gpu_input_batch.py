@@ -292,8 +292,8 @@ class InputBatch:
         self.pooling_states: dict[str, PoolingStates] = {}
 
         # Cached reference to the GPU tensor of previously sampled tokens
-        self.prev_sampled_token_ids: torch.Tensor | None = None
-        self.prev_req_id_to_index: dict[str, int] | None = None
+        self.prev_sampled_token_ids: torch.Tensor | None = None # 上一批调度的token输出
+        self.prev_req_id_to_index: dict[str, int] | None = None # 上一批调度的槽位映射表
         # These are used to update output_token_ids with real sampled
         # ids from prior step, if required by current sampling params
         # (e.g. penalties).

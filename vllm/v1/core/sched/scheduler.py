@@ -1,5 +1,52 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# 【模块说明】sched/scheduler.py —— 核心调度器实现（Scheduler）
+#
+# Scheduler 是 vLLM v1 的核心调度引擎，实现 SchedulerInterface，
+# 每个 EngineCore 实例持有一个 Scheduler，负责决定每步 forward pass
+# 处理哪些请求、处理多少 token，并消费 GPU 输出推进请求状态。
+#
+# 请求状态机：
+#   WAITING（waiting 队列）  →  schedule() 分配 KV 块后  →  RUNNING（running 队列）
+#   RUNNING                  →  生成完成 / 停止条件触发  →  FINISHED_*
+#   RUNNING                  →  KV 内存不足（抢占）      →  WAITING（重新入队）
+#   WAITING                  →  外部依赖未就绪            →  skipped_waiting 队列
+#
+# 三个主要队列：
+#   waiting         : 标准等待队列（FCFSRequestQueue 或 PriorityRequestQueue）；
+#   running         : 当前正在执行的请求列表；
+#   skipped_waiting : 因外部依赖（远端 KV、结构化输出 grammar、流式输入）
+#                     或 LoRA 约束而暂时跳过的请求，每步检查是否可重入 waiting。
+#
+# schedule() 主流程（每步调用一次）：
+#   1. 处理上步完成的请求（finished_req_ids → 释放 KV 块）；
+#   2. 遍历 waiting 队列，尝试将请求提升为 running：
+#      - 查询前缀缓存（get_computed_blocks），计算本步 token 数；
+#      - 调用 KVCacheManager.allocate_slots() 分配物理块；
+#      - budget 检查（max_num_batched_tokens、max_num_seqs）；
+#   3. 遍历 running 队列，为续跑请求分配本步 token（含投机解码 draft tokens）；
+#   4. 内存不足时触发抢占（_preempt_request），将 running 请求退回 waiting；
+#   5. 调用 get_grammar_bitmask() 生成结构化输出 bitmask（延迟填充）；
+#   6. 返回 SchedulerOutput。
+#
+# update_from_output() 主流程（消费 GPU 结果）：
+#   1. 将 ModelRunnerOutput 中的 sampled_token_ids 写入各请求；
+#   2. 调用 check_stop() 判断是否达到停止条件；
+#   3. 收集 EngineCoreOutputs（token ids、logprobs 等）分发给各 client；
+#   4. 处理分布式 KV 传输（KVConnector.update_state_after_step）。
+#
+# 其他重要功能：
+#   - Chunked Prefill    : 超长 prompt 分多步完成，每步受 max_num_batched_tokens 限制；
+#   - 投机解码（SD）     : schedule_spec_decode_tokens() 注入 draft tokens，
+#                          update_draft_token_ids() 接收外部 draft token 更新；
+#   - LoRA               : 按 running LoRA 集合限制新请求加入，避免超过 max_loras；
+#   - 多模态 Budget      : EncoderCacheManager + MultiModalBudget 控制 encoder token 槽位；
+#   - 分布式 KV（KVConnector）: 支持 prefill / decode 分离部署，WAITING_FOR_REMOTE_KVS 状态。
+
+# vLLM 采用连续批处理（Continuous Batching）：每一步结束后重新决定下一步参与计算的请求集合。
+# 一个请求完成了，立刻释放它的 KV 块和 batch 位置；一个新请求到了，如果有预算就立刻放进来。
+
 import itertools
 import time
 from collections import defaultdict, deque
@@ -163,7 +210,7 @@ class Scheduler(SchedulerInterface):
             ) from e
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
-        # requests skipped in waiting flow due async deps or constraints.
+        # requests skipped in waiting flow due async deps or constraints， waitng中暂时无法调度的
         self.skipped_waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
 
@@ -349,11 +396,34 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
+        #
+        # spec_token_ids: draft模型猜测的待验证的
+        # num_output_placeholders: 在异步调度中累计产生的输出（新增）token的占位数量
+        # _all_token_ids    = [prompt tokens...] + [confirmed output tokens...] ，结果返回push进来                                                                                                                                                          
+        #               ←─── num_prompt_tokens ───→ ←── output_token_ids ──→                                                                                                                                                                                                
+        # spec_token_ids    = [draft candidates...]   ← 未确认，不在 _all_token_ids 里
+        # num_tokens_with_spec = len(_all_token_ids) + len(spec_token_ids)
+        # num_computed_tokens — 已完成 KV cache 计算的 token 数量.
+        
+        # _all_token_ids 里的 token 已经有对应的 KV Cache，可以被后续 token attend                                                                                                                                                       
+        # spec_token_ids 的 KV Cache 是预分配的，但如果被拒绝就要释放
+        # 验证通过后，spec_token_ids 里的 token 才会 append 进 _output_token_ids 和 _all_token_ids  
+        
+        # 【多请求合批策略】
+        # 每次调用产生唯一一个 SchedulerOutput，其中包含本步所有可调度请求的
+        # token 分配信息（num_scheduled_tokens dict）。合批策略是贪心的：
+        #   1. 优先调度 running 队列中已在执行的请求（续跑）；
+        #   2. 再从 waiting 队列中接纳新请求；
+        #   3. 以 max_num_scheduled_tokens（token budget）为硬上限，
+        #      尽可能多地塞入 token，装不下的留到下一步。
+        # ModelRunner 收到 SchedulerOutput 后，将所有请求的 token 拼接成
+        # 一个 flat tensor（[total_tokens, hidden_dim]）送入模型，
+        # 权重只加载一次，所有请求共享，实现 continuous batching。
 
-        scheduled_new_reqs: list[Request] = []
-        scheduled_resumed_reqs: list[Request] = []
-        scheduled_running_reqs: list[Request] = []
-        preempted_reqs: list[Request] = []
+        scheduled_new_reqs: list[Request] = []  # WAITING第一次被调度（新请求）
+        scheduled_resumed_reqs: list[Request] = [] # PREEMPTED 被抢占后重新调度，需要重新prefill
+        scheduled_running_reqs: list[Request] = [] # RUNNING 已经在运行的请求
+        preempted_reqs: list[Request] = [] # 调度失败（KV不足），被清理出去的请求。
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -366,6 +436,16 @@ class Scheduler(SchedulerInterface):
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
+        """Spec = Speculative Decoding（推测解码）                                                                                                                                                                                          
+                                                            
+        decode 阶段的瓶颈是：每步只生成 1 个 token，但要把整个大模型的权重过一遍，GPU 严重利用不足。                                                                                                                                     
+                                                                    
+        Spec Decoding 的思路：用一个小的 draft 模型（比如 1B 参数）快速猜出后续几个 token，再用大的 target 模型一次性验证：
+
+        draft模型（快）：  猜测 [t1, t2, t3, t4, t5]
+        target模型（慢）： 一次 forward 验证全部 5 个 token
+            → t1正确，t2正确，t3正确，t4错误 → 接受 t1 t2 t3，拒绝后面的"""
+        
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
         # For logging.
@@ -405,7 +485,7 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
-            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
+            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens: # prefill太长时，分批处理，避免占用过多资源导致调度不公平
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
 
@@ -930,8 +1010,8 @@ class Scheduler(SchedulerInterface):
         )
 
         scheduler_output = SchedulerOutput(
-            scheduled_new_reqs=new_reqs_data,
-            scheduled_cached_reqs=cached_reqs_data,
+            scheduled_new_reqs=new_reqs_data, # 新请求
+            scheduled_cached_reqs=cached_reqs_data, # 已经被调度过的老请求
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
@@ -1407,7 +1487,7 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids = (
+            generated_token_ids = ( # 包含bonus token: 无论 draft 接受几个，最后都必须补一个"目标模型的独立采样"作为 bonus token
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
 

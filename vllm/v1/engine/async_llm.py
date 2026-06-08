@@ -1,5 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# 【模块说明】AsyncLLM —— 异步推理引擎前端
+#
+# 实现 EngineClient 协议，是 OpenAI 兼容 API 服务器（以及其他异步调用方）
+# 与底层 EngineCore 之间的核心桥梁。主要职责：
+#
+#   1. 请求接入
+#      - generate() / encode()：供 API 服务器调用，返回 AsyncGenerator，
+#        流式吐出 RequestOutput / PoolingRequestOutput。
+#      - add_request()：将输入（文本 / token IDs / 多模态流等）经
+#        InputProcessor 预处理后构造 EngineCoreRequest，再分发给 EngineCore。
+#      - 支持 n>1 并行采样（通过 ParentRequest 拆分子请求）。
+#      - 支持流式输入（AsyncGenerator[StreamingInput]，适用于增量补全场景）。
+#
+#   2. 输出驱动循环（output_handler）
+#      - 在 asyncio 后台任务中持续从 EngineCore 拉取 EngineCoreOutputs，
+#        经 OutputProcessor 转换后推送到各请求对应的 RequestOutputCollector。
+#      - 按 VLLM_V1_OUTPUT_PROC_CHUNK_SIZE 分批处理，避免长时间阻塞事件循环。
+#      - 将需要提前中止的请求（命中 stop string 等）回传给 EngineCore。
+#
+#   3. 引擎管理
+#      - 封装 EngineCoreClient（进程间 ZMQ 通信）的创建与生命周期。
+#      - 暴露 pause_generation / resume_generation、sleep / wake_up、
+#        add_lora / remove_lora、reset_prefix_cache 等管控接口。
+#      - 支持 Elastic EP（弹性数据并行）在线扩缩容（scale_elastic_ep）。
+#      - 支持 RL 训练场景下的在线权重更新（init/start/update/finish_weight_update）。
+#
+#   4. 统计与可观测性
+#      - 通过 StatLoggerManager 记录并上报推理性能指标。
+#      - 支持 OpenTelemetry 分布式追踪和 Torch Profiler。
+
 import asyncio
 import os
 import socket

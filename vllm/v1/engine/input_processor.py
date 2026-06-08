@@ -1,6 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# 【模块说明】InputProcessor —— 请求预处理与 EngineCoreRequest 构造模块
+#
+# 将上层 API 接收到的原始提示（PromptType / EngineInput）转换为可直接发往
+# EngineCore 的 EngineCoreRequest，主要职责包括：
+#
+#   1. 参数校验     : 校验 SamplingParams / PoolingParams 的合法性，检查任务类型
+#                    是否与模型支持的任务兼容（生成 vs 池化）。
+#   2. 请求 ID 分配 : 生成全局唯一的内部 request_id；记录外部 external_req_id。
+#   3. 分词处理     : 调用 InputPreprocessor 对文本/tokens 进行预处理，
+#                    支持编码器-解码器模型的输入分割。
+#   4. 多模态特征提取: 若模型支持多模态输入，提取并编码图像/音频等特征（MultiModalFeatureSpec），
+#                    并按位置排序；若特征超出 encoder_cache_size 则拒绝请求。
+#   5. 提示长度检查 : 验证 prompt token 数量不超过 max_model_len。
+#   6. LoRA 处理   : 检查 LoRA 配置合法性（开关、最大 ID、是否支持）。
+#   7. prompt_embeds: 支持直接传入预计算的 embedding 张量（混合模式）。
+#
+# 主要类：InputProcessor
+
 import time
 from collections.abc import Mapping
 from typing import Any, Literal

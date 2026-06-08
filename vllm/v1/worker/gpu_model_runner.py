@@ -464,7 +464,7 @@ class GPUModelRunner(
         self.calculate_kv_scales = self.cache_config.calculate_kv_scales
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
-        self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        self.max_num_tokens = scheduler_config.max_num_batched_tokens # 单次forward最大的token数量
         self.max_num_reqs = scheduler_config.max_num_seqs
 
         # Broadcast PP output for external_launcher (torchrun)
@@ -716,9 +716,18 @@ class GPUModelRunner(
 
         # Persistent buffers for CUDA graphs.
         self.input_ids = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
+        """
+        CUDA Graph 要求 tensor shape 固定
+        一次 forward 的 batch 布局（所有请求 token 拼接）：
+                                                                                                                                                                                                                       
+        [req0_tok0, req0_tok1, ..., req1_tok0, req1_tok1, ..., req2_tok0]
+            |<────────────── total_num_scheduled_tokens ──────────────>|                                                                                                                                                        
+                              ≤ max_num_batched_tokens
+        """
         self.positions = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=self.device
         )
+        # 每个request的起始位置在input_ids中的index
         self.query_start_loc = self._make_buffer(
             self.max_num_reqs + 1, dtype=torch.int32
         )
@@ -1131,6 +1140,16 @@ class GPUModelRunner(
 
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
+        
+        两层状态结构                                                                                                                                                                                                         
+                  
+        self.requests          dict[req_id → CachedRequestState]
+                                ← "所有已知请求"的完整状态（含未被调度的）
+                                ← 包括 output_token_ids, block_ids, sampling_params 等
+
+        self.input_batch       InputBatch（persistent batch）
+                                ← "当前批次"的 GPU/CPU tensor 视图
+                                ← 只含被调度的请求，有 slot 索引 req_id_to_index
         """
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
@@ -1171,6 +1190,8 @@ class GPUModelRunner(
         # that case we include the resumed_req_ids in the unscheduled set so
         # that they get cleared from the persistent batch before being re-scheduled
         # in the normal resumed request path.
+        # reset_prefix_cache 的边角情况：被强制抢占且同步恢复的请求，
+        # 需要先从 persistent batch 里删掉再重新插入，否则旧的 block_ids 会污染新的调度状态。
         unscheduled_req_ids = cached_req_ids - (scheduled_req_ids - resumed_req_ids)
         # NOTE(woosuk): The persistent batch optimization assumes that
         # consecutive batches contain mostly the same requests. If batches
@@ -1186,7 +1207,7 @@ class GPUModelRunner(
         if is_ngram_gpu:
             ngram_gpu_new_reqs: list[CachedRequestState] = []
 
-        reqs_to_add: list[CachedRequestState] = []
+        reqs_to_add: list[CachedRequestState] = [] # add to inputbatch
         deferred_spec_decode_corrections = []
 
         # Add new requests to the cached states.
@@ -1335,6 +1356,7 @@ class GPUModelRunner(
             if not is_last_rank:
                 if not req_data.new_token_ids:
                     # Async scheduled PP: Sampled tokens propagated via GPU broadcast.
+                    # 由last_rank更新
                     new_token_ids: list[int] = []
                 else:
                     # Non-async scheduling with PP: The scheduler sends
@@ -1919,7 +1941,8 @@ class GPUModelRunner(
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
-        # where M is the max_model_len.
+        # where M is the max_model_len， 预分配
+        # 展平成1D索引
         token_indices = (
             positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1]
         )
@@ -1982,7 +2005,7 @@ class GPUModelRunner(
                 output_idx += num_sched
 
         # Prepare the attention metadata.
-        self.query_start_loc.np[0] = 0
+        self.query_start_loc.np[0] = 0 # 防御性写法
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
         # Note: pad query_start_loc to be non-decreasing, as kernels
         # like FlashAttention requires that

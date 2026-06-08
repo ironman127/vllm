@@ -1,6 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# 【模块说明】utils —— 引擎进程管理与 ZMQ 地址配置工具模块
+#
+# 提供 EngineCore 进程的生命周期管理、启动握手协议及 ZMQ 地址分配等基础设施，
+# 供 AsyncLLM / LLMEngine 在初始化时调用。
+#
+# 主要类与函数：
+#   CoreEngineState       : 枚举，描述单个 DP rank Engine 握手状态（NEW/CONNECTED/READY）。
+#   CoreEngine            : 每个 DP rank Engine 的握手状态追踪对象（identity + state）。
+#   EngineZmqAddresses    : dataclass，汇总引擎与前端通信所需的全部 ZMQ 地址
+#                           （inputs/outputs/coordinator_input/coordinator_output/
+#                            frontend_stats_publish_address）。
+#   EngineHandshakeMetadata: 握手消息体，包含 addresses 和 parallel_config 信息，
+#                            由前端在 HELLO 阶段发送给 EngineCore。
+#   CoreEngineProcManager : 管理本地子进程（multiprocessing.Process）方式启动的
+#                           EngineCore 进程组，提供存活监控与优雅关停。
+#   CoreEngineActorManager: 管理 Ray Actor 方式启动的 EngineCore 进程组，
+#                           支持多节点 DP 部署、弹性扩缩容（scale_up/down_elastic_ep）
+#                           及 Ray placement group 管理。
+#   SignalCallback        : 通过专用线程安全地从信号处理上下文触发回调。
+#   launch_core_engines() : 上下文管理器，根据配置启动 EngineCore 进程组和
+#                           DPCoordinator，等待握手完成后 yield 给调用者。
+#   wait_for_engine_startup(): 在握手 socket 上等待所有 EngineCore 完成
+#                              HELLO → CONNECTED → READY 状态转换。
+#   get_engine_zmq_addresses(): 根据 VllmConfig 为当前部署模式分配 ZMQ 地址。
+#   set_device_control_env_var(): 临时设置 CUDA_VISIBLE_DEVICES 等设备控制环境变量，
+#                                  用于 DP 模式下隔离各 rank 的 GPU 可见范围。
+
 import contextlib
 import os
 import threading

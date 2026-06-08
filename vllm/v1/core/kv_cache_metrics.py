@@ -1,5 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# 【模块说明】kv_cache_metrics.py —— KV Cache 块生命周期指标采集
+#
+# 提供对 KV Cache 物理块的细粒度性能指标跟踪，用于监控前缀缓存命中率、
+# 块淘汰频率和块访问热度，辅助性能调优。
+#
+# 主要内容：
+#   BlockMetricsState      : 单个 KVCacheBlock 的生命周期状态记录器，包含：
+#                            - birth_time_ns     : 块分配时间戳（ns）
+#                            - last_access_ns    : 最近访问时间戳（ns）
+#                            - access_history    : 最近 4 次访问时间戳（有界 deque）
+#                            通过 record_access() 更新访问记录。
+#
+#   KVCacheMetricsCollector: 全局指标采集器，以 1% 采样率（默认）跟踪块事件：
+#                            - on_block_allocated() : 为抽样块创建 BlockMetricsState；
+#                            - on_block_cached()    : 记录块内容写入（开始计算生命周期）；
+#                            - on_block_evicted()   : 块被 LRU 淘汰时生成
+#                              KVCacheEvictionEvent（含存活时长、访问频率等），
+#                              上报给 SchedulerStats。
+#
+# 采样设计：
+#   采样率（sample_rate=0.01）由配置控制，仅对 1% 的块启用完整指标跟踪，
+#   显著降低开销，保证在大规模部署中不影响调度性能。
 """KV cache metrics tracking."""
 
 import random

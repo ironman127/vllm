@@ -1,5 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# 【模块说明】sched/utils.py —— 调度器辅助工具函数
+#
+# 提供 Scheduler.update_from_output() 阶段调用的请求终止判断与清理工具，
+# 与核心调度逻辑分离，便于独立测试。
+#
+# 主要内容：
+#   check_stop()              : 判断请求是否满足停止条件，包括：
+#                               - max_tokens / max_model_len 限制
+#                               - stop_token_ids（命中停止词）
+#                               - ignore_eos 标志
+#                               返回对应的 RequestStatus（FINISHED_STOPPED /
+#                               FINISHED_LENGTH_CAPPED / FINISHED_IGNORED）。
+#
+#   check_sequence_repetition(): 检测生成序列是否出现重复模式，
+#                               用于 RepetitionDetectionParams 配置的请求，
+#                               触发 FINISHED_STOPPED_BY_REPETITION。
+#
+#   _has_repeating_pattern()  : check_sequence_repetition 的内部实现，
+#                               比较尾部 pattern_len 个 token 与前若干重复段。
+#
+#   remove_all()              : 从可变列表中批量删除指定集合内的元素（O(n) 原地过滤）。
+
 import contextlib
 from collections.abc import Sequence
 

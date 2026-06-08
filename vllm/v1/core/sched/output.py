@@ -1,6 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# 【模块说明】sched/output.py —— 调度器输出数据结构（调度器→ModelRunner 数据契约）
+#
+# 定义调度器每步产生的结构化输出，是 Scheduler 与 ModelRunner 之间的数据边界。
+# ModelRunner 依赖此处的字段来构建 forward pass 的输入张量。
+#
+# 主要内容：
+#   NewRequestData     : 首次进入 running 状态的请求携带的全量信息
+#                        （prompt tokens、多模态特征、采样参数、LoRA 信息等），
+#                        ModelRunner 用它初始化 KV Cache 和请求上下文。
+#
+#   CachedRequestData  : 已在 running 状态的请求携带的增量信息
+#                        （resume_token_ids、多模态 token 位置等），
+#                        本步只传差量，避免重复序列化 prompt。
+#
+#   SchedulerOutput    : 每个调度步骤的完整输出，包含：
+#                        - scheduled_new_reqs / scheduled_cached_reqs  新/续请求列表
+#                        - num_scheduled_tokens  各请求本步处理的 token 数
+#                        - scheduled_spec_decode_tokens  投机解码 draft tokens
+#                        - finished_req_ids  本步完成的请求（通知 ModelRunner 释放资源）
+#                        - preempted_req_ids  被抢占的请求（异步调度保护用）
+#                        - grammar_bitmask_output  结构化输出 bitmask（延迟填充）
+#                        - kv_connector_metadata  分布式 KV 传输元数据
+#
+#   GrammarOutput      : 结构化输出（如 JSON Schema、正则）的 grammar bitmask 容器，
+#                        由 StructuredOutputManager 填充，附加在 SchedulerOutput 中。
+
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
@@ -110,11 +136,23 @@ class NewRequestData:
 
 @dataclass
 class CachedRequestData:
-    req_ids: list[str]
+    req_ids: list[str] # 本步所有 running + resumed 请求的 ID 列表（有序）
     # For request ids not in resumed_req_ids, new_block_ids will be appended to
     # the request's block IDs. For those in the set, new_block_ids will be used as the
     # request's block IDs instead of appending to the existing block IDs.
+    # block_ids 的两种更新模式                                                                                                                                                                                   
+                  
+    # 调度器每步可能给请求分配新的 KV cache block，但怎么"用"这些 block_ids 取决于请求的状态：
+
+    # req_id 不在 resumed_req_ids 中（正常 running）：
+    #    req_state.block_ids.extend(new_block_ids)   ← 追加
+    #    含义：请求还在继续生成，新 block 是追加在已有 KV 后面的
+
+    # req_id 在 resumed_req_ids 中（被抢占后恢复）：
+    #    req_state.block_ids = new_block_ids          ← 替换
+    #    含义：请求被抢占时旧 KV 已被释放，调度器分配了全新的 block 集合
     resumed_req_ids: set[str]
+    
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]

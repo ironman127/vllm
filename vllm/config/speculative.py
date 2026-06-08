@@ -1078,7 +1078,7 @@ class SpeculativeConfig:
 
     def uses_extract_hidden_states(self) -> bool:
         return self.method == "extract_hidden_states"
-
+    #  GPU 加速版 N-gram 投机解码
     def use_ngram_gpu(self) -> bool:
         return self.method == "ngram_gpu"
 

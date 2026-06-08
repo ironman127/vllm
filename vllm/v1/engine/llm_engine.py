@@ -1,6 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# 【模块说明】LLMEngine —— 同步推理引擎前端（向后兼容层）
+#
+# 为保持与 v0 API 的向后兼容性而提供的同步版引擎前端，内部组合了 v1 组件：
+#   - InputProcessor  : 请求预处理
+#   - EngineCoreClient（SyncMPClient）: 与 EngineCore 子进程的同步 ZMQ 通信
+#   - OutputProcessor : 将 EngineCoreOutput 转换为 RequestOutput
+#
+# 对外暴露与 v0 LLMEngine 兼容的同步接口，主要供 LLM（批量离线推理）使用：
+#   - add_request() / abort_request()
+#   - step()           : 驱动一次推理步骤，返回已完成请求的 RequestOutput 列表
+#   - generate()/encode(): 供 LLM 包装器调用
+#   - 统计与可观测性: StatLoggerManager, OpenTelemetry tracer
+#
+# 数据并行（DP）支持：
+#   - 在 external_launcher 模式下，LLMEngine 可独立运行于每个 DP rank，
+#     各自管理单个 EngineCore；通过 get_dp_group 初始化进程组。
+#
+# 注意：新功能应优先在 AsyncLLM（异步前端）中实现，本模块仅维护兼容性。
+
 import time
 from collections.abc import Callable, Mapping
 from copy import copy

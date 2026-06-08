@@ -1,5 +1,54 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# 【模块说明】DPCoordinator —— 数据并行(DP)部署的协调进程
+#
+# 【DP 整体架构】
+#   各 DP rank（EngineCore）之间完全对等，没有主从关系，每个 rank 独立运行
+#   自己的 Scheduler + KVCacheManager + Executor（管理该 rank 的 TP×PP Worker）。
+#   DPCoordinator 是独立的协调进程，负责负载均衡信息的汇聚与分发；它碰巧
+#   跟 rank 0 部署在同一节点，但并不归 rank 0 管控。
+#
+#   典型拓扑（多节点 DP）：
+#
+#     节点 A                           节点 B
+#     ┌──────────────────────┐        ┌──────────────────────┐
+#     │  DPCoordinator       │        │                      │
+#     │  API Server (前端)   │        │  API Server (前端)   │
+#     │  EngineCore rank 0   │        │  EngineCore rank 1   │
+#     └──────────────────────┘        └──────────────────────┘
+#              ↑  ZMQ（负载统计 + wave 控制）  ↑
+#              └──────────────────────────────┘
+#
+#   API Server 根据 DPCoordinator 广播的负载数据（各 rank 的 waiting/running
+#   队列长度）自主决定将请求路由到哪个 EngineCore，实现请求级负载均衡。
+#
+# 仅在 data_parallel_size > 1 时使用，作为独立子进程运行，通过 ZMQ 连接
+# 多个 DP EngineCore 进程与一个或多个前端 API 服务进程，承担以下职责：
+#
+#   1. 负载统计聚合与发布
+#      - 收集各 DP Engine 上报的 [waiting, running] 请求队列长度；
+#      - 定期（默认 100ms）将汇总后的负载数据发布给所有前端，
+#        供前端做请求路由的负载均衡决策。
+#
+#   2. 请求波次（Wave）协调
+#      - DP 引擎组整体在"运行"与"全局暂停"之间交替：所有引擎完成当前
+#        批次后集体暂停，收到新请求后集体唤醒，每次"运行→暂停"的转换
+#        计为一个新 wave。
+#      - 追踪 current_wave 与 engines_running 状态，并在以下情况下向
+#        所有引擎广播 START_DP_WAVE 消息（使其从暂停恢复运行）：
+#          a. 前端在引擎暂停期间发来新请求时；
+#          b. 某引擎收到属于旧 wave 的请求（竞态兜底）时。
+#
+#   3. 弹性扩缩容（Elastic EP）感知
+#      - 监听前端发来的 SCALE_ELASTIC_EP 消息，动态增删 engines 列表，
+#        并向新加入引擎发送 READY 信号。
+#
+# 主要类：
+#   DPCoordinator     : 父进程侧句柄，负责启动协调子进程并暴露 ZMQ 地址。
+#   DPCoordinatorProc : 运行在子进程中的实际协调循环实现。
+#   EngineState       : 每个 DP Engine 的本地状态（请求计数）。
+
 import copy
 import multiprocessing
 import multiprocessing.connection

@@ -1,6 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# 【模块说明】tensor_ipc —— 基于 torch.multiprocessing.Queue 的张量跨进程共享模块
+#
+# 在 API 服务进程与 EngineCore 进程之间高效传递多模态张量（如图像特征），
+# 通过共享内存（share_memory_()）实现零拷贝 IPC，避免通过 ZMQ socket 序列化大型张量。
+#
+# 适用场景：多模态模型输入中包含预计算张量时（mm_tensor_ipc="torch_shm"），
+# 仅支持 DP=1（单 rank 0 消费）。
+#
+# 主要类：
+#   TensorIpcData    : 数据容器，持有 sender_id / message_id / tensor_id / tensor，
+#                      通过 torch.multiprocessing.Queue 传输。
+#   TensorIpcSender  : 发送端（API server 侧），实现 OOBTensorConsumer 接口，
+#                      将张量放入共享内存队列并返回句柄（handle dict）供 msgpack 层引用。
+#   TensorIpcReceiver: 接收端（EngineCore 侧），从队列取出 TensorIpcData，
+#                      按 (sender_id, message_id, tensor_id) 匹配并重组张量。
+
 """Tensor IPC transport via torch.multiprocessing.Queue.
 
 This module contains the queue-based transport logic for sharing tensors

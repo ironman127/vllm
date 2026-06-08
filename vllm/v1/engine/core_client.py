@@ -1,5 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# 【模块说明】EngineCoreClient —— 前端与 EngineCore 的通信抽象层
+#
+# 将上层引擎（AsyncLLM / LLMEngine）与底层 EngineCore 进程之间的
+# 通信细节完全封装，对上层暴露统一的同步/异步接口。
+#
+# 继承体系：
+#   EngineCoreClient（ABC）
+#     ├── InprocClient          : 进程内直接调用，用于 V0-style LLMEngine（无 ZMQ）。
+#     ├── MPClient（基类）
+#     │     ├── SyncMPClient    : 同步多进程模式，供 LLM（批量离线推理）使用；
+#     │     │                     后台线程独立消费 ZMQ 输出 socket，结果存入 queue.Queue。
+#     │     └── AsyncMPClient   : 异步多进程模式，供 AsyncLLM 使用；
+#     │           │               asyncio 任务消费 ZMQ 输出 socket，结果存入 asyncio.Queue。
+#     │           ├── DPAsyncMPClient   : 数据并行外部负载均衡模式（单客户端对应单 DP rank）；
+#     │           │                       与 DPCoordinator 通信以追踪 wave 状态，
+#     │           │                       在引擎暂停时发送唤醒通知。
+#     │           └── DPLBAsyncMPClient : 数据并行内部负载均衡模式；
+#     │                                   根据各 Engine 实时队列长度做 P2C 路由，
+#     │                                   支持 Elastic EP 在线扩缩容。
+#
+# 核心机制：
+#   - 请求发送 : input_socket (ROUTER/DEALER ZMQ) 发送 EngineCoreRequest（ADD/ABORT）
+#                或工具方法调用（UTILITY），带 msgpack 序列化。
+#   - 输出接收 : output_socket (PULL ZMQ) 接收 EngineCoreOutputs，经 MsgpackDecoder 解码。
+#   - 工具调用 : call_utility_async() 通过 UTILITY 消息 + asyncio.Future 实现 RPC 语义，
+#                支持 profile、reset_prefix_cache、add_lora 等引擎控制操作。
+#   - 张量 IPC : 与 TensorIpcSender 配合，将多模态张量通过共享内存队列零拷贝传递给 EngineCore。
+#   - 就绪握手 : 构造时在 input_socket 上等待所有 EngineCore 发送 READY 消息，
+#                同步 post-init 配置（max_model_len、num_gpu_blocks 等）。
+#   - 引擎监控 : 后台线程监控 EngineCore 进程存活，崩溃时置 engine_dead 标志并触发关闭。
+
 import asyncio
 import contextlib
 import queue

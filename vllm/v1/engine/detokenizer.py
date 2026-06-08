@@ -1,5 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# 【模块说明】Detokenizer —— 增量解码（Detokenization）模块
+#
+# 负责将 EngineCore 每步返回的新 token ID 列表增量地转换为可读文本，
+# 并在流式输出时支持 stop string 匹配与延迟裁剪。
+#
+# 类层次：
+#   IncrementalDetokenizer        : 最基础的空实现（仅追加 token_ids，无文本转换），
+#                                   在 tokenizer=None（跳过解码）时使用。
+#   BaseIncrementalDetokenizer    : 抽象中间层，封装 stop string 检测、min_tokens、
+#                                   include_stop_str_in_output 等通用逻辑。
+#   FastIncrementalDetokenizer    : 高性能实现，依赖 tokenizers >= 0.22.0 的
+#                                   DecodeStream API（含原生 prefill ids 支持），
+#                                   仅在 tokenizer 为 PreTrainedTokenizerFast 时启用。
+#   SlowIncrementalDetokenizer    : 纯 Python 回退实现，调用 detokenize_incrementally
+#                                   逐 token 构建输出文本。
+#
+# 工厂方法 IncrementalDetokenizer.from_new_request() 根据 tokenizer 类型和
+# tokenizers 版本自动选择合适的实现。
+
 from abc import ABC, abstractmethod
 
 import tokenizers

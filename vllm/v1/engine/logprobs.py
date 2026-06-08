@@ -1,6 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# 【模块说明】LogprobsProcessor —— 对数概率后处理模块
+#
+# 负责将 EngineCore 每步返回的原始 logprobs 数据（LogprobsLists / LogprobsTensors）
+# 转换为结构化的 API 输出格式（SampleLogprobs / PromptLogprobs），供
+# OutputProcessor 最终组装 RequestOutput 时使用。
+#
+# 主要职责：
+#   - 采样 logprobs   : 将 EngineCore 输出的 (token_ids, logprobs, ranks) 列表
+#                       解包后追加到 SampleLogprobs，同时累积 cumulative_logprob。
+#                       支持每步多 token（如 speculative decoding）。
+#   - Prompt logprobs : 将 prefill 阶段返回的 prompt logprobs tensors 转换为
+#                       PromptLogprobs 格式，仅在请求开始（首步）时处理。
+#   - Token 解码      : 若需要，调用 tokenizer 将 token ID 转换为字符串，
+#                       用于 logprobs 的 decoded_token 字段。
+#
+# 主要类：LogprobsProcessor（dataclass，每个请求一个实例）
+
 import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass

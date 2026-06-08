@@ -1,6 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# 【模块说明】v1 engine 公共数据协议层
+#
+# 定义前端（AsyncLLM / LLMEngine）与后端（EngineCore）之间通信所需的全部数据结构，
+# 包括：
+#   - EngineCoreRequest      : 前端发往 EngineCore 的推理请求，携带 token IDs、
+#                              多模态特征、采样/池化参数、LoRA 信息等。
+#   - EngineCoreOutput       : EngineCore 每步返回的单请求输出（新生成 token、
+#                              logprobs、finish_reason 等）。
+#   - EngineCoreOutputs      : 一次推理步骤所有请求输出的集合（含调度器统计）。
+#   - FinishReason           : 请求结束原因枚举（stop / length / abort / error /
+#                              repetition），同时也是对外 API 的一部分。
+#   - EngineCoreRequestType  : ZMQ 消息头中的请求类型标识（ADD / ABORT / UTILITY 等）。
+#   - UtilityOutput          : 工具方法（profile、reset_cache 等）的调用结果。
+#   - EngineCoreReadyResponse: EngineCore 启动完成后发送给前端的初始化信息
+#                              （如经自动调整后的 max_model_len）。
+#   - EEPNotificationType    : 弹性专家并行（Elastic EP）的通知类型枚举。
+#   - PauseMode              : pause_generation() 的暂停模式类型别名
+#                              （"abort" / "wait" / "keep"）。
+#
+# 本模块不包含任何业务逻辑，仅作为跨进程消息的序列化契约。
+
 import enum
 import time
 from collections.abc import Mapping

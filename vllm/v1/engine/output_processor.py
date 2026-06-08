@@ -1,6 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# 【模块说明】OutputProcessor —— 推理输出处理与请求状态管理模块
+#
+# 承担从 EngineCore 原始输出到最终 API 响应的全部转换逻辑，每个活跃请求
+# 在此模块维护一份完整的状态（RequestState）。
+#
+# 主要类：
+#   RequestOutputCollector : 单请求的异步输出收集器，对接 asyncio generate 任务。
+#                            - put()   : 非阻塞写入；delta 模式下自动合并堆积输出。
+#                            - get()   : 阻塞等待下一个输出（asyncio.Event）。
+#   OutputProcessor        : 管理所有活跃请求的状态，将 EngineCoreOutput 转换为
+#                            RequestOutput 或 PoolingRequestOutput。
+#                            - add_request()   : 注册新请求，创建 RequestState 及
+#                              对应的 IncrementalDetokenizer、LogprobsProcessor、
+#                              RequestOutputCollector。
+#                            - process_outputs(): 处理一批 EngineCoreOutputs，
+#                              更新各请求状态并分发输出。
+#                            - abort_requests(): 移除并清理已中止请求的状态。
+#
+# 数据流：
+#   EngineCore → EngineCoreOutputs → OutputProcessor.process_outputs()
+#     → IncrementalDetokenizer（增量解码）
+#     → LogprobsProcessor（logprobs 处理）
+#     → RequestOutputCollector.put()
+#     → AsyncLLM output_handler → 用户 generate() 流
+
 import asyncio
 from collections import defaultdict, deque
 from collections.abc import Iterable

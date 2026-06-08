@@ -1,6 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# 【模块说明】kv_cache_manager.py —— KV Cache 调度器侧门面（Facade）
+#
+# KVCacheManager 是调度器（Scheduler）操作 KV Cache 的唯一入口，对调度器
+# 隐藏内部分层结构（KVCacheCoordinator → SingleTypeKVCacheManager → BlockPool）。
+#
+# 核心职责：
+#   1. 请求 KV Block 分配（allocate_slots）
+#      - 每步调度时为新请求或续跑请求分配物理块；
+#      - 利用前缀哈希（prefix hash）查询并复用已缓存的 KV Block（prefix cache hit）；
+#      - 返回 KVCacheBlocks 对象，内含各 KV group 的物理块列表。
+#
+#   2. 请求完成/抢占后的块释放（free_finished_request）
+#      - 将请求占用的物理块归还 BlockPool 的 free list；
+#      - 已缓存的块（has_content=True）不立即释放，由 LRU 延迟淘汰。
+#
+#   3. 前缀缓存管理（reset_prefix_cache）
+#      - 权重热更新（live reload）时失效所有缓存块，防止 stale KV 被复用。
+#
+#   4. KVCacheEvent 发布（get_and_reset_kv_event_list）
+#      - 收集 BlockStored / AllBlocksCleared 等事件，供分布式 KV 传输（KVConnector）使用。
+#
+# 主要类/数据结构：
+#   KVCacheBlocks : 分配结果容器，持有各 KV group 的 KVCacheBlock 列表，
+#                   是 Scheduler 与 KVCacheManager 的接口数据类。
+#
+#   KVCacheManager: 门面类，持有一个 KVCacheCoordinator，所有操作委托给 Coordinator
+#                   按 KV Cache 类型路由到对应的 SingleTypeKVCacheManager。
+
 import itertools
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -123,7 +151,7 @@ class KVCacheManager:
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ) -> None:
-        self.max_model_len = max_model_len
+        self.max_model_len = max_model_len # 模型上下文长度最大值
         # When unset, fall back to `max_model_len` so the recycling-aware cap
         # collapses to the prior (uncapped) admission behavior. The scheduler
         # always supplies the real value at runtime.
@@ -204,6 +232,7 @@ class KVCacheManager:
             A tuple containing:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
+        获取已经计算得前缀缓存
         """
         # We skip finding the prefix cache hit when prefix caching is
         # disabled or the request is marked as skipping kv cache read
@@ -218,6 +247,7 @@ class KVCacheManager:
         # the single last token, because allocate_slots() requires
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
+        # 模型要输出下一个token，需要把最后一个token完整decode一次，也就是说最后一个token是必须重新计算的
         max_cache_hit_length = request.num_tokens - 1
         computed_blocks, num_new_computed_tokens = (
             self.coordinator.find_longest_cache_hit(
@@ -260,8 +290,14 @@ class KVCacheManager:
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such
                 as eagle.
+                提前占位
             num_external_computed_tokens: The number of tokens that their
                 KV caches are not cached by vLLM but cached by the connector.
+            Prefill/Decode 分离， KVConnector 负责接收和管理
+            P 节点（大算力 GPU）：专门跑 prefill，吃满算力
+                ↓ 传 KV Cache
+            D 节点（内存带宽大的 GPU）：专门跑 decode，不被 prefill 打断
+            
             delay_cache_blocks: Whether to skip caching the blocks. This is
                 used by P/D when allocating blocks used in a KV transfer
                 which will complete in a future step.
@@ -278,6 +314,7 @@ class KVCacheManager:
                 async KV-connector loads so their initial allocation cannot consume
                 blocks an already in-flight (prefilling) sequence is relying on.
 
+                准入规则：prefill时先检查kv cache是否可以装下整条prefill
         Blocks layout:
         ```
         ----------------------------------------------------------------------
@@ -364,6 +401,7 @@ class KVCacheManager:
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
             )
+            # 需要新分配得block数量大于空闲block数量，返回None，不分配block
             if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
                 return None
 
@@ -403,6 +441,7 @@ class KVCacheManager:
         ):
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
+            # 先把前缀命中的块写入request
             self.coordinator.allocate_new_computed_blocks(
                 request_id=request.request_id,
                 new_computed_blocks=new_computed_block_list,
@@ -427,6 +466,7 @@ class KVCacheManager:
         # "non-committable" tokens (e.g., draft tokens that could be rejected).
         # Therefore, we cap the number at `request.num_tokens`, ensuring only
         # "finalized" tokens are cached.
+        # 更新prefix cache
         num_tokens_to_cache = min(
             total_computed_tokens + num_new_tokens,
             request.num_tokens,

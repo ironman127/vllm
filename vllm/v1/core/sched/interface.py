@@ -1,5 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# 【模块说明】sched/interface.py —— 调度器抽象接口层
+#
+# 定义 SchedulerInterface（ABC）和 PauseState 枚举，是所有调度器实现
+#（Scheduler、AsyncScheduler）必须遵守的公共契约。
+#
+# 主要内容：
+#   PauseState       : 调度器暂停状态枚举（UNPAUSED / PAUSED_NEW / PAUSED_ALL），
+#                      用于 DP wave 协调——PAUSED_NEW 只跑已在 running 的请求，
+#                      PAUSED_ALL 完全暂停。
+#
+#   SchedulerInterface : 抽象基类，定义以下核心方法：
+#     schedule()              → SchedulerOutput  每步调度入口，决定本步执行哪些请求
+#     update_from_output()    → EngineCoreOutputs  消费 GPU 结果，推进请求状态
+#     get_grammar_bitmask()                      结构化输出的 grammar bitmask 生成
+#     add_request() / finish_requests()          请求生命周期管理（入队 / 完成/取消）
+#     update_draft_token_ids()                   投机解码 draft token 注入
+#     pause_state / set_pause_state()            DP wave 暂停/恢复控制
+#     reset_prefix_cache() / reset_encoder_cache()  权重热更新后缓存失效
+#     has_requests() / has_unfinished_requests() 请求计数查询
+#     make_stats()                               输出 SchedulerStats 供监控使用
+
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Iterable

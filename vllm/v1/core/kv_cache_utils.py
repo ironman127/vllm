@@ -1,5 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# 【模块说明】kv_cache_utils.py —— KV Cache 底层数据结构与哈希工具集
+#
+# 本模块是 KV Cache 子系统的"原语层"，定义物理块对象、块哈希类型，以及
+# 各种前缀哈希的计算工具函数，被 BlockPool、SingleTypeKVCacheManager、
+# KVCacheCoordinator 等上层模块广泛引用。
+#
+# 主要数据结构：
+#   KVCacheBlock            : 单个物理块的运行时对象（block_id、ref_count、block_hash、
+#                             prev_block 链、content_token_ids 等）；
+#                             同时用作 FreeKVCacheBlockQueue 的链表节点。
+#
+#   FreeKVCacheBlockQueue   : 基于双向链表（prev/next 指针内嵌于 KVCacheBlock）
+#                             的 free list，支持 O(1) 头/尾操作及任意节点移除，
+#                             实现 LRU 淘汰顺序。
+#
+#   BlockHash               : NewType(int)，一个整型哈希值，代表块内容的指纹；
+#   BlockHashWithGroupId    : (BlockHash, group_id)，多 KV group 场景下区分同一
+#                             token 序列在不同 group 中的缓存块；
+#   BlockHashList / BlockHashListWithBlockSize : 前缀哈希序列容器。
+#   ExternalBlockHash       : 外部（远端）块哈希，用于分布式 KV 传输场景。
+#
+# 哈希工具函数：
+#   get_block_hash()              : 计算单个块的哈希（token_ids + extra_keys + parent_hash）；
+#   generate_block_hash_extra_keys(): 从请求多模态 hash 等信息中生成 extra_keys；
+#   sha256_cbor / xxhash_cbor     : 底层哈希函数（用于内容哈希 vs 快速哈希）；
+#   maybe_convert_block_hash()    : 外部块哈希与内部哈希格式转换。
+#
+# 其他工具：
+#   BlockHashToBlockMap     : dict[BlockHash, KVCacheBlock]，前缀缓存索引（在 BlockPool 中实例化）；
+#   compute_kv_cache_blocks_memory(): 计算指定配置下 KV Cache 总显存占用（字节）；
+#   unify_kv_cache_configs() : 多 KV group 配置归一化，为 KVCacheCoordinator 准备输入。
 """KV-Cache Utilities."""
 
 import copy
