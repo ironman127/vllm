@@ -40,7 +40,7 @@ inline __device__ float qk_dot_(const Vec (&q)[N], const Vec (&k)[N]) {
   // Finalize the reduction across lanes.
   float qk = sum(qk_vec);
 #pragma unroll
-  for (int mask = THREAD_GROUP_SIZE / 2; mask >= 1; mask /= 2) {
+  for (int mask = THREAD_GROUP_SIZE / 2; mask >= 1; mask /= 2) { // XOR 蝶形规约：所有线程参与规约计算，要求为2的幂次方
     qk += VLLM_SHFL_XOR_SYNC(qk, mask);
   }
   return qk;

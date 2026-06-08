@@ -127,7 +127,7 @@ __device__ void paged_attention_kernel(
       MIN(start_token_idx + num_blocks * BLOCK_SIZE, seq_len);
   const int num_tokens = end_token_idx - start_token_idx;
 
-  constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1);
+  constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1); // 一个warp负责一个block的计算，同一个block内的内存地址是连续的。
   constexpr int NUM_THREAD_GROUPS =
       NUM_THREADS / THREAD_GROUP_SIZE;  // Note: This assumes THREAD_GROUP_SIZE
                                         // divides NUM_THREADS
@@ -141,7 +141,7 @@ __device__ void paged_attention_kernel(
 
   const int head_idx = blockIdx.x;
   const int num_heads = gridDim.x;
-  const int num_queries_per_kv = num_heads / num_kv_heads;
+  const int num_queries_per_kv = num_heads / num_kv_heads; // GQA使用, i.e. 0, 1, 2, 3 q共享一个kv。 num_heads: Q head_num, kv_head_num: kv head num
   const int kv_head_idx = head_idx / num_queries_per_kv;
   const float alibi_slope =
       alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
@@ -151,7 +151,7 @@ __device__ void paged_attention_kernel(
   // group fetch or compute 16 bytes at a time. For example, if the size of a
   // thread group is 4 and the data type is half, then the vector size is 16 /
   // (4 * sizeof(half)) == 2.
-  constexpr int VEC_SIZE = MAX(16 / (THREAD_GROUP_SIZE * sizeof(scalar_t)), 1);
+  constexpr int VEC_SIZE = MAX(16 / (THREAD_GROUP_SIZE * sizeof(scalar_t)), 1); // 把 128-bit 的向量化加载粒度均摊到 thread group 内每个线程上
   using K_vec = typename Vec<scalar_t, VEC_SIZE>::Type;
   using Q_vec = typename Vec<scalar_t, VEC_SIZE>::Type;
   using Quant_vec = typename Vec<cache_t, VEC_SIZE>::Type;
@@ -217,7 +217,7 @@ __device__ void paged_attention_kernel(
   }
 
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx;
-       block_idx += NUM_WARPS) {
+       block_idx += NUM_WARPS) { // 一个cuda block 计算一个 partion 的多个 kv block. 
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to
     // int64 because int32 can lead to overflow when this variable is multiplied
     // by large numbers (e.g., kv_block_stride).
@@ -261,7 +261,7 @@ __device__ void paged_attention_kernel(
       K_vec k_vecs[NUM_VECS_PER_THREAD];
 
 #pragma unroll
-      for (int j = 0; j < NUM_VECS_PER_THREAD; j++) {
+      for (int j = 0; j < NUM_VECS_PER_THREAD; j++) { // 遍历 head，计算qk点积
         const cache_t* k_ptr =
             k_cache + physical_block_number * kv_block_stride +
             kv_head_idx * kv_head_stride + physical_block_offset * x;
@@ -532,6 +532,8 @@ __global__ void paged_attention_v2_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
     const cache_t* __restrict__ k_cache,  // [num_blocks, num_kv_heads,
                                           // head_size/x, block_size, x]
+                                          //  constexpr int x = 16 / sizeof(cache_t);                                                                                                                                                                                                                               
+                                          // 本质是一次 128-bit 向量加载能装几个元素
     const cache_t* __restrict__ v_cache,  // [num_blocks, num_kv_heads,
                                           // head_size, block_size]
     const int num_kv_heads,               // [num_heads]
