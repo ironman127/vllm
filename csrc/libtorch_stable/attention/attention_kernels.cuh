@@ -315,7 +315,7 @@ __device__ void paged_attention_kernel(
   // Get the max qk value for the sequence.
   qk_max = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
 #pragma unroll
-  for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
+  for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) { // 每个warp计算block内的qk_max
     qk_max = fmaxf(qk_max, VLLM_SHFL_XOR_SYNC(qk_max, mask));
   }
   // Broadcast the max qk value to all threads.
@@ -323,12 +323,12 @@ __device__ void paged_attention_kernel(
 
   // Get the sum of the exp values.
   float exp_sum = 0.f;
-  for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
+  for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) { // 划分：每个cuda block 计算一个partition
     float val = __expf(logits[i] - qk_max);
     logits[i] = val;
     exp_sum += val;
   }
-  exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum);
+  exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum); // 计算cuda block的exp_sum
 
   // Compute softmax.
   const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
@@ -356,7 +356,7 @@ __device__ void paged_attention_kernel(
   using Float_L_vec = typename FloatVec<L_vec>::Type;
 
   constexpr int NUM_V_VECS_PER_ROW = BLOCK_SIZE / V_VEC_SIZE;
-  constexpr int NUM_ROWS_PER_ITER = WARP_SIZE / NUM_V_VECS_PER_ROW;
+  constexpr int NUM_ROWS_PER_ITER = WARP_SIZE / NUM_V_VECS_PER_ROW; // 一个warp负责NUM_ROWS_PER_ITER rows
   constexpr int NUM_ROWS_PER_THREAD =
       DIVIDE_ROUND_UP(HEAD_SIZE, NUM_ROWS_PER_ITER);
 
@@ -370,7 +370,7 @@ __device__ void paged_attention_kernel(
   scalar_t zero_value;
   zero(zero_value);
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx;
-       block_idx += NUM_WARPS) {
+       block_idx += NUM_WARPS) { // 划分：每个cuda block 计算一个partition
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to
     // int64 because int32 can lead to overflow when this variable is multiplied
     // by large numbers (e.g., kv_block_stride).
@@ -394,7 +394,7 @@ __device__ void paged_attention_kernel(
     const cache_t* v_ptr = v_cache + physical_block_number * kv_block_stride +
                            kv_head_idx * kv_head_stride;
 #pragma unroll
-    for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
+    for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) { // 每个thread 读取一个V_vec
       const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
       if (row_idx < HEAD_SIZE) {
         const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
@@ -425,7 +425,7 @@ __device__ void paged_attention_kernel(
     }
   }
 
-  // Perform reduction within each warp.
+  // Perform reduction within each warp(multi rows).
 #pragma unroll
   for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
     float acc = accs[i];
@@ -445,7 +445,7 @@ __device__ void paged_attention_kernel(
 #pragma unroll
   for (int i = NUM_WARPS; i > 1; i /= 2) {
     int mid = i / 2;
-    // Upper warps write to shared memory.
+    // Upper warps write to shared memory, eliminate divergengce in same warp.
     if (warp_idx >= mid && warp_idx < i) {
       float* dst = &out_smem[(warp_idx - mid) * HEAD_SIZE];
 #pragma unroll
