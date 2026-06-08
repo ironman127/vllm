@@ -219,8 +219,6 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = vllm_config.max_concurrent_batches
-        # batch_queue 是 EngineCore（CPU）侧管理 future 的结构，不是 GPU Worker 直接读的队列。
-        self.batch_queue_size = self.model_executor.max_concurrent_batches
         self.batch_queue: (
             deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
         ) = None
