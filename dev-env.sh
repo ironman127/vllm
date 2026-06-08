@@ -5,7 +5,7 @@
 # 1) 前向兼容：让 cuda-compat-13-0 的新版 libcuda.so（580.159.04）优先于宿主 535。
 #    compat 装于 /usr/local/cuda-13.0/compat，已通过 /etc/ld.so.conf.d/00-cuda-compat.conf
 #    全局注册，这里再显式置顶做双保险。
-export LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
 # 2) 编译缓存与并行度（增量编译关键）
 #    ccache 按源文件内容哈希缓存编译产物，第二遍编译命中后可快数倍~数十倍。
